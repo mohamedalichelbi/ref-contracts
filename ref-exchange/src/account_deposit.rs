@@ -5,29 +5,35 @@ use std::convert::TryInto;
 
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::json_types::{ValidAccountId, U128};
-use near_sdk::{assert_one_yocto, env, near_bindgen, AccountId, Balance};
+use near_sdk::{assert_one_yocto, env, near_bindgen, AccountId, Balance, StorageUsage};
 
 use crate::utils::{ext_fungible_token, GAS_FOR_FT_TRANSFER};
 use crate::*;
 
-const MAX_ACCOUNT_LENGTH: u128 = 64;
-const MIN_ACCOUNT_DEPOSIT_LENGTH: u128 = MAX_ACCOUNT_LENGTH + 16 + 4;
+/// Minimum Account Storage used for account registration.
+/// 64 (AccountID bytes) + 2*8 (int32) + byte
+pub const INIT_ACCOUNT_STORAGE: StorageUsage = 64 + 16 + 4;
+/// NEAR native token
+pub const NEAR: AccountId = r#"near"#;
 
 /// Account deposits information and storage cost.
 #[derive(BorshSerialize, BorshDeserialize, Default)]
 #[cfg_attr(feature = "test", derive(Clone))]
 pub struct AccountDeposit {
-    /// Native amount sent to the exchange.
-    /// Used for storage now, but in future can be used for trading as well.
-    pub amount: Balance,
+    /// NEAR sent to the exchange.
+    /// Used for storage and trading.
+    pub ynear: Balance,
     /// Amounts of various tokens in this account.
     pub tokens: HashMap<AccountId, Balance>,
+    pub storage_used: StorageUsage,
 }
 
 impl AccountDeposit {
     /// Adds amount to the balance of given token while checking that storage is covered.
-    pub fn add(&mut self, token: AccountId, amount: Balance) {
-        if let Some(x) = self.tokens.get_mut(&token) {
+    pub(crate) fn add(&mut self, token: &AccountId, amount: Balance) {
+        if *token == NEAR {
+            self.ynear += amount;
+        } else if let Some(x) = self.tokens.get_mut(token) {
             *x = *x + amount;
         } else {
             self.tokens.insert(token.clone(), amount);
@@ -37,39 +43,53 @@ impl AccountDeposit {
 
     /// Subtract from `token` balance.
     /// Panics if `amount` is bigger than the current balance.
-    pub fn sub(&mut self, token: AccountId, amount: Balance) {
-        let value = *self.tokens.get(&token).expect(ERR21_TOKEN_NOT_REG);
+    pub(crate) fn sub(&mut self, token: &AccountId, amount: Balance) {
+        if *token == NEAR {
+            self.ynear -= amount;
+            self.assert_storage_usage();
+            return;
+        }
+        let value = *self.tokens.get(token).expect(ERR21_TOKEN_NOT_REG);
         assert!(value >= amount, ERR22_NOT_ENOUGH_TOKENS);
-        self.tokens.insert(token, value - amount);
+        self.tokens.insert(*token, value - amount);
     }
 
     /// Returns amount of $NEAR necessary to cover storage used by this data structure.
+    #[inline]
     pub fn storage_usage(&self) -> Balance {
-        (MIN_ACCOUNT_DEPOSIT_LENGTH + self.tokens.len() as u128 * (MAX_ACCOUNT_LENGTH + 16))
+        (if self.storage_used < INIT_ACCOUNT_STORAGE {
+            self.storage_used
+        } else {
+            INIT_ACCOUNT_STORAGE
+        }) as Balance
             * env::storage_byte_cost()
     }
 
     /// Returns how much NEAR is available for storage.
-    pub fn storage_available(&self) -> Balance {
-        self.amount - self.storage_usage()
+    #[inline]
+    pub(crate) fn storage_available(&self) -> Balance {
+        self.ynear - self.storage_usage()
     }
 
     /// Asserts there is sufficient amount of $NEAR to cover storage usage.
-    pub fn assert_storage_usage(&self) {
+    #[inline]
+    pub(crate) fn assert_storage_usage(&self) {
         assert!(
-            self.storage_usage() <= self.amount,
+            self.storage_usage() <= self.ynear,
             ERR11_INSUFFICIENT_STORAGE
         );
     }
 
-    /// Returns minimal account deposit storage usage possible.
-    pub fn min_storage_usage() -> Balance {
-        MIN_ACCOUNT_DEPOSIT_LENGTH * env::storage_byte_cost()
+    /// Updates the account storage usage and sets.
+    pub(crate) fn update_storage(&mut self, tx_start_storage: StorageUsage) {
+        let s = env::storage_usage();
+        self.storage_used += s - tx_start_storage;
+        self.assert_storage_usage();
     }
 
-    /// Registers given token and set balance to 0.
-    /// Fails if not enough amount to cover new storage usage.
-    pub fn register(&mut self, token_id: &AccountId) {
+    /// Registers given `token_id` and set balance to 0.
+    /// Fails if not enough NEAR is in deposit to cover new storage usage.
+    pub(crate) fn register(&mut self, token_id: &AccountId) {
         self.tokens.insert(token_id.clone(), 0);
         self.assert_storage_usage();
     }
@@ -137,7 +157,7 @@ impl Contract {
     /// This should be used when it's known that storage is prepaid.
     pub(crate) fn internal_register_account(&mut self, account_id: &AccountId, amount: Balance) {
         let mut deposit_amount = self.deposited_amounts.get(&account_id).unwrap_or_default();
-        deposit_amount.amount += amount;
+        deposit_amount.ynear += amount;
         self.deposited_amounts.insert(&account_id, &deposit_amount);
     }
 
@@ -168,7 +188,7 @@ impl Contract {
     }
 
     /// Returns current balance of given token for given user. If there is nothing recorded, returns 0.
-    pub(crate) fn internal_get_deposit(
+    pub(crate) fn get_deposit_balance(
         &self,
         sender_id: &AccountId,
         token_id: &AccountId,
@@ -177,5 +197,12 @@ impl Contract {
             .get(sender_id)
             .and_then(|d| d.tokens.get(token_id).cloned())
             .unwrap_or_default()
+    }
+
+    /// Auxillary function to update storage when we don't have AccountDeposit object in a context
+    pub(crate) fn update_storage(&self, from: &AccountDeposit, tx_start_storage: StorageUsage) {
+        let mut d = self.get_account_depoists(from);
+        d.update_storage(tx_start_storage);
+        self.deposited_amounts.insert(from, &d);
     }
 }

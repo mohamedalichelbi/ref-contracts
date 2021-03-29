@@ -98,7 +98,7 @@ impl Contract {
 
     /// Returns balance of the deposit for given user outside of any pools.
     pub fn get_deposit(&self, account_id: ValidAccountId, token_id: ValidAccountId) -> U128 {
-        self.internal_get_deposit(account_id.as_ref(), token_id.as_ref())
+        self.get_deposit_balance(account_id.as_ref(), token_id.as_ref())
             .into()
     }
 

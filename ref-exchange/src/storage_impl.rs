@@ -62,7 +62,7 @@ impl StorageManagement for Contract {
                 "ERR_STORAGE_UNREGISTER_TOKENS_NOT_EMPTY"
             );
             self.deposited_amounts.remove(&account_id);
-            Promise::new(account_id.clone()).transfer(account_deposit.amount);
+            Promise::new(account_id.clone()).transfer(account_deposit.ynear);
             true
         } else {
             false
@@ -71,7 +71,7 @@ impl StorageManagement for Contract {
 
     fn storage_balance_bounds(&self) -> StorageBalanceBounds {
         StorageBalanceBounds {
-            min: AccountDeposit::min_storage_usage().into(),
+            min: (INIT_ACCOUNT_STORAGE as u128 * env::storage_byte_cost()).into(),
             max: None,
         }
     }
@@ -80,7 +80,7 @@ impl StorageManagement for Contract {
         self.deposited_amounts
             .get(account_id.as_ref())
             .map(|deposits| StorageBalance {
-                total: U128(deposits.amount),
+                total: U128(deposits.ynear),
                 available: U128(deposits.storage_available()),
             })
     }

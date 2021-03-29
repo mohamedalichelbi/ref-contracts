@@ -8,7 +8,7 @@ use near_sdk::collections::{LookupMap, UnorderedSet, Vector};
 use near_sdk::json_types::{ValidAccountId, U128};
 use near_sdk::{assert_one_yocto, env, log, near_bindgen, AccountId, PanicOnDefault, Promise};
 
-use crate::account_deposit::AccountDeposit;
+use crate::account_deposit::{AccountDeposit, INIT_ACCOUNT_STORAGE};
 pub use crate::action::*;
 use crate::errors::*;
 use crate::pool::Pool;
@@ -65,6 +65,7 @@ impl Contract {
     /// Attached NEAR should be enough to cover the added storage.
     #[payable]
     pub fn add_simple_pool(&mut self, tokens: Vec<ValidAccountId>, fee: u32) -> u64 {
+        assert_one_yocto();
         check_token_duplicates(&tokens);
         self.internal_add_pool(Pool::SimplePool(SimplePool::new(
             self.pools.len() as u32,
@@ -109,7 +110,7 @@ impl Contract {
         let mut pool = self.pools.get(pool_id).expect("ERR_NO_POOL");
         // Add amounts given to liquidity first. It will return the balanced amounts.
         pool.add_liquidity(&sender_id, &mut amounts);
-        let mut deposits = self.deposited_amounts.get(&sender_id).unwrap_or_default();
+        let mut deposits = self.get_account_depoists(&sender_id);
         let tokens = pool.tokens();
         // Subtract updated amounts from deposits. This will fail if there is not enough funds for any of the tokens.
         for i in 0..tokens.len() {
@@ -135,7 +136,7 @@ impl Contract {
         );
         self.pools.replace(pool_id, &pool);
         let tokens = pool.tokens();
-        let mut deposits = self.deposited_amounts.get(&sender_id).unwrap_or_default();
+        let mut deposits = self.get_account_depoists(&sender_id);
         for i in 0..tokens.len() {
             deposits.add(tokens[i].clone(), amounts[i]);
         }
@@ -149,16 +150,11 @@ impl Contract {
     /// If there is not enough attached balance to cover storage, fails.
     /// If too much attached - refunds it back.
     fn internal_add_pool(&mut self, pool: Pool) -> u64 {
-        let prev_storage = env::storage_usage();
+        let start_storage = env::storage_usage();
         let id = self.pools.len() as u64;
         self.pools.push(&pool);
 
-        // Check how much storage cost and refund the left over back.
-        let storage_cost = (env::storage_usage() - prev_storage) as u128 * env::storage_byte_cost();
-        assert!(
-            storage_cost <= env::attached_deposit(),
-            "ERR_STORAGE_DEPOSIT"
-        );
+        // TODO: update deposit handling
         let refund = env::attached_deposit() - storage_cost;
         if refund > 0 {
             Promise::new(env::predecessor_account_id()).transfer(refund);
@@ -178,7 +174,8 @@ impl Contract {
         min_amount_out: U128,
         referral_id: Option<AccountId>,
     ) -> U128 {
-        let mut deposits = self.deposited_amounts.get(&sender_id).unwrap_or_default();
+        let start_storage = env::storage_usage();
+        let mut deposits = self.get_account_depoists(&sender_id);
         let amount_in: u128 = amount_in.into();
         deposits.sub(token_in.as_ref().clone(), amount_in);
         let mut pool = self.pools.get(pool_id).expect("ERR_NO_POOL");
@@ -193,6 +190,8 @@ impl Contract {
         deposits.add(token_out.as_ref().clone(), amount_out);
         self.deposited_amounts.insert(&sender_id, &deposits);
         self.pools.replace(pool_id, &pool);
+        deposits.update_storage(start_storage);
+        self.deposited_amounts.insert(&sender_id, &deposits);
         amount_out.into()
     }
 }
